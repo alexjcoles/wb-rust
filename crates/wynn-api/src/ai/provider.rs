@@ -52,6 +52,7 @@ pub struct AiResponse {
 
 /// Trait for AI providers. Each implementation handles its own
 /// tool-use loop internally — the caller gets back a final response.
+#[allow(dead_code)]
 pub trait AiProvider: Send + Sync {
     fn chat<'a>(
         &'a self,
@@ -62,6 +63,7 @@ pub trait AiProvider: Send + Sync {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum AiError {
     #[error("provider error: {0}")]
     Provider(String),

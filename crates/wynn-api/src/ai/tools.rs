@@ -271,6 +271,7 @@ fn parse_objective(s: &str) -> Option<Objective> {
 }
 
 /// Tool definitions for AI providers (JSON schema format).
+#[allow(dead_code)]
 pub fn tool_definitions() -> Value {
     json!([
         {

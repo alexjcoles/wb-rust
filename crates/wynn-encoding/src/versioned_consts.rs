@@ -16,7 +16,6 @@ pub struct EncodingConsts {
     pub equipment_num: usize,
     pub tome_num: usize,
     pub num_aspects: usize,
-    pub sp_types: usize,
 }
 
 /// Wynncraft version names, indexed by version ID in the hash.
@@ -48,7 +47,6 @@ pub fn consts_for_version(version: usize) -> EncodingConsts {
         equipment_num: 9,
         tome_num: 14,
         num_aspects: 5,
-        sp_types: 5,
     };
 
     // Adjust for older versions
