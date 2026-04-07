@@ -1,0 +1,15 @@
+[package]
+name = "wynn-solver"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wynn-core = { path = "../wynn-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rayon = "1"
+
+[dev-dependencies]
+wynn-encoding = { path = "../wynn-encoding" }

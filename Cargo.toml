@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wynn-core",
+    "crates/wynn-encoding",
+    "crates/wynn-solver",
+    "crates/wynn-api",
+]
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
