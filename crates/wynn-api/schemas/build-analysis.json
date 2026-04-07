@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "Markdown-formatted build analysis and recommendations"
+    },
+    "suggested_flex_slots": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Equipment slots to change (e.g. boots, ring1). Empty if no changes suggested."
+    },
+    "suggested_objectives": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Stats to maximise in solver (e.g. ehp, thunder_defence). Empty if no changes suggested."
+    }
+  },
+  "required": ["analysis", "suggested_flex_slots", "suggested_objectives"],
+  "additionalProperties": false
+}
