@@ -1,5 +1,5 @@
 use crate::item::Apparel;
-use crate::stats::{Element, ElementalValues, SkillPoints};
+use crate::stats::{ElementalValues, SkillPoints};
 
 /// Result of skill point assignment calculation.
 #[derive(Debug, Clone)]
@@ -11,9 +11,10 @@ pub struct SpAssignment {
 }
 
 impl SpAssignment {
-    /// Total manually assigned points.
+    /// Total manually assigned points (only positive assignments count).
     pub fn total_assigned(&self) -> i32 {
-        self.assigned.sum()
+        let arr = self.assigned.as_array();
+        arr.iter().filter(|&&v| v > 0).sum()
     }
 
     /// Whether the assignment is valid (each element <= 100, total <= budget).
@@ -24,7 +25,6 @@ impl SpAssignment {
 }
 
 /// Convert skill points to the percentage bonus they provide.
-/// This is the fundamental curve used throughout Wynncraft.
 const R: f64 = 0.9908;
 
 pub fn skill_points_to_percentage(skp: i32) -> f64 {
@@ -33,295 +33,389 @@ pub fn skill_points_to_percentage(skp: i32) -> f64 {
 }
 
 /// Fast check: can these items possibly fit within the SP budget?
-/// Sums all positive adds and checks against max requirements.
 pub fn fast_sp_check(apparels: &[&Apparel], available_points: i32) -> bool {
-    let mut total_add = ElementalValues::<i32>::default();
-    let mut max_req = ElementalValues::<i32>::default();
+    let mut total_add = [0i32; 5];
+    let mut max_req = [0i32; 5];
 
     for apparel in apparels {
-        for elem in Element::ALL {
-            let add = apparel.skill_point_bonus.get(elem);
-            *elem_mut(&mut total_add, elem) += add;
-
-            let req = apparel.requirements.get(elem);
-            if req > max_req.get(elem) {
-                max_req.set(elem, req);
-            }
+        let add = apparel.skill_point_bonus.as_array();
+        let req = apparel.requirements.as_array();
+        for i in 0..5 {
+            total_add[i] += add[i];
+            if req[i] > max_req[i] { max_req[i] = req[i]; }
         }
     }
 
     let mut total_gap = 0i32;
-    for elem in Element::ALL {
-        let gap = (max_req.get(elem) - total_add.get(elem).max(0)).max(0);
+    for i in 0..5 {
+        let gap = (max_req[i] - total_add[i].max(0)).max(0);
+        if gap > 100 { return false; }
         total_gap += gap;
     }
 
     total_gap <= available_points
 }
 
-/// Calculate the optimal skill point assignment for a set of apparels + weapon.
-///
-/// Uses Tarjan's SCC algorithm to find groups of mutually-dependent items,
-/// tries all permutations within each SCC, and picks the ordering that
-/// minimises total assigned SP.
-///
-/// This matches the `scc_put_calculate` algorithm from WynnBuilderTools.
+// ---------------------------------------------------------------------------
+// WynnBuilder-matching SP calculation
+//
+// Matches hppeng-wynn skillpoints.js `calculate_skillpoints` exactly:
+// - Recursive permutation search over item orderings
+// - "Skip constraint" checks: an ordering is only valid if items that were
+//   skipped truly could not have been equipped at the point they were skipped
+// - "Pop check" (fix_should_pop): after all items, verify each item won't
+//   pop off due to its own negative SP bonuses
+// - Weapon is applied last, after all apparel
+// - Game equip order: boots, leggings, chestplate, helmet, ring1, ring2,
+//   bracelet, necklace
+// ---------------------------------------------------------------------------
+
+/// Calculate skill point assignment matching WynnBuilder exactly.
 pub fn calculate_sp_assignment(
     apparels: &[&Apparel],
     weapon_req: &ElementalValues<i32>,
     weapon_add: &ElementalValues<i32>,
 ) -> SpAssignment {
-    let n = apparels.len();
-    if n == 0 {
+    if apparels.is_empty() {
         return apply_weapon_only(weapon_req, weapon_add);
     }
 
-    // Build dependency graph: item i depends on item j if j provides SP
-    // that could help meet i's requirements
-    let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            if depends_on(apparels[i], apparels[j]) {
-                adj[i].push(j);
-            }
-        }
+    // Extract SP data into flat arrays for fast access
+    let n = apparels.len();
+    let mut reqs = vec![[0i32; 5]; n];
+    let mut adds = vec![[0i32; 5]; n];
+    for (i, a) in apparels.iter().enumerate() {
+        reqs[i] = a.requirements.as_array();
+        adds[i] = a.skill_point_bonus.as_array();
     }
 
-    // Find SCCs using Tarjan's algorithm
-    let sccs = tarjan_scc(n, &adj);
+    let w_req = weapon_req.as_array();
+    let w_add = weapon_add.as_array();
 
-    // Try all permutations within each SCC, topological order between SCCs.
-    // Tarjan returns SCCs with providers before consumers (deepest-first),
-    // which is already the order we want: process SP-giving items first.
-    let scc_order = sccs;
+    let mut best = RecurseState {
+        best_assigned: [0; 5],
+        best_total: [0; 5],
+        best_cost: i32::MAX,
+        best_under100: false,
+    };
 
-    // For small SCCs (most cases), try all permutations.
-    // For large SCCs (rare), fall back to greedy within the component.
-    let mut best_assigned = None;
-    let mut best_total = None;
-    let mut best_cost = i32::MAX;
+    let initial_order: Vec<usize> = (0..n).collect();
 
-    // Generate all possible orderings by permuting within each SCC
-    let mut orderings: Vec<Vec<usize>> = vec![vec![]];
+    recurse_check(
+        &reqs, &adds, &w_req, &w_add,
+        &mut [0; 5],     // assigned
+        &mut [0; 5],     // totals
+        0,               // total_applied
+        &mut vec![],      // skipped_states (SP totals when each item was skipped)
+        &mut vec![],      // prior_skipped (indices of skipped items)
+        &mut vec![],      // equipped (indices of equipped items)
+        &initial_order,   // remains_in_order
+        &mut best,
+    );
 
-    for scc in &scc_order {
-        if scc.len() <= 6 {
-            // Try all permutations of this SCC
-            let perms = permutations(scc);
-            let mut new_orderings = Vec::with_capacity(orderings.len() * perms.len());
-            for base in &orderings {
-                for perm in &perms {
-                    let mut o = base.clone();
-                    o.extend_from_slice(perm);
-                    new_orderings.push(o);
-                }
-            }
-            orderings = new_orderings;
-        } else {
-            // Too many permutations; use greedy sort within SCC
-            let mut sorted = scc.clone();
-            sorted.sort_by(|&a, &b| {
-                apparels[b]
-                    .skill_point_bonus
-                    .sum()
-                    .cmp(&apparels[a].skill_point_bonus.sum())
-            });
-            for o in &mut orderings {
-                o.extend_from_slice(&sorted);
-            }
-        }
-
-        // Prune: keep only orderings that are competitive so far.
-        // Cap to avoid explosion (shouldn't happen with typical builds of 8 items).
-        if orderings.len() > 5000 {
-            orderings.truncate(5000);
-        }
-    }
-
-    for ordering in &orderings {
-        let (assigned, total) = evaluate_ordering(apparels, ordering, weapon_req, weapon_add);
-        let cost = assigned.sum();
-        if cost < best_cost {
-            best_cost = cost;
-            best_assigned = Some(assigned);
-            best_total = Some(total);
-        }
+    // If no valid ordering found, fall back to simple greedy
+    if best.best_cost == i32::MAX {
+        return greedy_fallback(apparels, weapon_req, weapon_add);
     }
 
     SpAssignment {
-        assigned: best_assigned.unwrap_or_default(),
-        total: best_total.unwrap_or_default(),
+        assigned: SkillPoints::from_array(best.best_assigned),
+        total: SkillPoints::from_array(best.best_total),
     }
 }
 
-/// Check if item `a` depends on item `b` (i.e., b's adds could help meet a's reqs).
-fn depends_on(a: &Apparel, b: &Apparel) -> bool {
-    for elem in Element::ALL {
-        let a_req = a.requirements.get(elem);
-        let b_add = b.skill_point_bonus.get(elem);
-        if a_req > 0 && b_add > 0 {
-            return true;
+struct RecurseState {
+    best_assigned: [i32; 5],
+    best_total: [i32; 5],
+    best_cost: i32,
+    best_under100: bool,
+}
+
+fn recurse_check(
+    reqs: &[[i32; 5]],
+    adds: &[[i32; 5]],
+    w_req: &[i32; 5],
+    w_add: &[i32; 5],
+    assigned: &mut [i32; 5],
+    totals: &mut [i32; 5],
+    total_applied: i32,
+    skipped_states: &mut Vec<[i32; 5]>,
+    prior_skipped: &mut Vec<usize>,
+    equipped: &mut Vec<usize>,
+    remains: &[usize],
+    best: &mut RecurseState,
+) {
+    if remains.len() == 1 {
+        // Base case: equip the last item, then weapon, then pop check
+        let item_idx = remains[0];
+
+        // Save state for backtracking
+        let saved_assigned = *assigned;
+        let saved_totals = *totals;
+
+        // Equip last item
+        apply_to_fit(assigned, totals, &reqs[item_idx]);
+        apply_bonuses(totals, &adds[item_idx]);
+
+        // Equip weapon
+        apply_to_fit(assigned, totals, w_req);
+        apply_bonuses(totals, w_add);
+
+        // Pop check: for every equipped item + this one, verify it won't pop off
+        let mut all_items: Vec<usize> = equipped.clone();
+        all_items.push(item_idx);
+
+        for &idx in &all_items {
+            fix_should_pop(assigned, totals, &reqs[idx], &adds[idx]);
         }
-    }
-    false
-}
 
-/// Evaluate a specific item ordering: greedily assign SP to meet each item's
-/// requirements, then add its bonuses.
-fn evaluate_ordering(
-    apparels: &[&Apparel],
-    order: &[usize],
-    weapon_req: &ElementalValues<i32>,
-    weapon_add: &ElementalValues<i32>,
-) -> (SkillPoints, SkillPoints) {
-    let mut assigned = SkillPoints::default();
-    let mut current = SkillPoints::default();
-
-    for &idx in order {
-        let apparel = apparels[idx];
-        // Assign enough SP to meet this item's requirements
-        for elem in Element::ALL {
-            let req = apparel.requirements.get(elem);
-            if req > 0 && current.get(elem) < req {
-                let gap = req - current.get(elem);
-                *elem_mut(&mut assigned, elem) += gap;
-                *elem_mut(&mut current, elem) += gap;
+        // Check skipped constraints with final deltas
+        let delta = compute_delta(&saved_totals, totals);
+        let mut valid = true;
+        for (skip_idx, skip_state) in prior_skipped.iter().zip(skipped_states.iter()) {
+            if can_equip_with_delta(skip_state, &delta, &reqs[*skip_idx]) {
+                valid = false;
+                break;
             }
         }
-        // Add this item's SP bonuses
-        for elem in Element::ALL {
-            *elem_mut(&mut current, elem) += apparel.skill_point_bonus.get(elem);
+
+        if valid {
+            let cost: i32 = assigned.iter().filter(|&&v| v > 0).sum();
+            let under100 = assigned.iter().all(|&v| v <= 100);
+
+            let is_better = cost < best.best_cost
+                || (cost == best.best_cost && under100 && !best.best_under100);
+
+            if is_better {
+                best.best_assigned = *assigned;
+                best.best_total = *totals;
+                best.best_cost = cost;
+                best.best_under100 = under100;
+            }
         }
+
+        // Restore state
+        *assigned = saved_assigned;
+        *totals = saved_totals;
+        return;
     }
 
-    // Apply weapon requirements
-    for elem in Element::ALL {
-        let req = weapon_req.get(elem);
-        if req > 0 && current.get(elem) < req {
-            let gap = req - current.get(elem);
-            *elem_mut(&mut assigned, elem) += gap;
-            *elem_mut(&mut current, elem) += gap;
+    // Recursive case: try each item in remains as the next to equip
+    for pick in 0..remains.len() {
+        let item_idx = remains[pick];
+
+        // Items before `pick` in remains are being "skipped" (head)
+        let head: Vec<usize> = remains[..pick].to_vec();
+        let tail: Vec<usize> = remains[pick + 1..].to_vec();
+
+        // Save state
+        let saved_assigned = *assigned;
+        let saved_totals = *totals;
+        let _saved_total_applied = total_applied;
+
+        // Equip this item
+        apply_to_fit(assigned, totals, &reqs[item_idx]);
+
+        // Check skip constraint 1: previously skipped items
+        // If any previously skipped item could have been equipped given the
+        // delta from this step, this ordering is invalid
+        let delta = compute_delta(&saved_totals, totals);
+        let mut skip1_valid = true;
+        for (skip_idx, skip_state) in prior_skipped.iter().zip(skipped_states.iter()) {
+            if can_equip_with_delta(skip_state, &delta, &reqs[*skip_idx]) {
+                skip1_valid = false;
+                break;
+            }
+        }
+
+        if !skip1_valid {
+            *assigned = saved_assigned;
+            *totals = saved_totals;
+            continue;
+        }
+
+        // Check skip constraint 2: head items being skipped now
+        // After fitting the picked item, could any head item be equipped?
+        let mut skip2_valid = true;
+        for &head_idx in &head {
+            if can_equip(totals, &reqs[head_idx]) {
+                skip2_valid = false;
+                break;
+            }
+        }
+
+        // Apply bonuses after skip2 check (WynnBuilder applies bonuses
+        // after checking if skipped items could fit)
+        apply_bonuses(totals, &adds[item_idx]);
+
+        if !skip2_valid {
+            *assigned = saved_assigned;
+            *totals = saved_totals;
+            continue;
+        }
+
+        let new_total_applied: i32 = assigned.iter().filter(|&&v| v > 0).sum();
+
+        // Prune: if already worse than best, skip
+        if new_total_applied >= best.best_cost {
+            *assigned = saved_assigned;
+            *totals = saved_totals;
+            continue;
+        }
+
+        // Record skip states for head items
+        let prev_skipped_len = prior_skipped.len();
+        let prev_states_len = skipped_states.len();
+        for &h in &head {
+            prior_skipped.push(h);
+            skipped_states.push(saved_totals);
+        }
+
+        // Build new remains: tail + head (skipped items go to end)
+        let mut new_remains = tail.clone();
+        new_remains.extend_from_slice(&head);
+
+        equipped.push(item_idx);
+
+        recurse_check(
+            reqs, adds, w_req, w_add,
+            assigned, totals, new_total_applied,
+            skipped_states, prior_skipped, equipped,
+            &new_remains, best,
+        );
+
+        equipped.pop();
+        prior_skipped.truncate(prev_skipped_len);
+        skipped_states.truncate(prev_states_len);
+
+        // Restore state
+        *assigned = saved_assigned;
+        *totals = saved_totals;
+    }
+}
+
+/// Assign enough SP to meet an item's requirements.
+fn apply_to_fit(assigned: &mut [i32; 5], totals: &mut [i32; 5], req: &[i32; 5]) {
+    for i in 0..5 {
+        if req[i] > 0 && totals[i] < req[i] {
+            let gap = req[i] - totals[i];
+            assigned[i] += gap;
+            totals[i] += gap;
         }
     }
-    // Add weapon bonuses
-    for elem in Element::ALL {
-        *elem_mut(&mut current, elem) += weapon_add.get(elem);
+}
+
+/// Add an item's SP bonuses to totals.
+fn apply_bonuses(totals: &mut [i32; 5], add: &[i32; 5]) {
+    for i in 0..5 {
+        totals[i] += add[i];
+    }
+}
+
+/// Pop check: after all items are equipped, verify an item won't "pop off".
+/// For non-crafted items: effective_req = req + bonus.
+/// If effective_req > current total, assign more SP.
+fn fix_should_pop(assigned: &mut [i32; 5], totals: &mut [i32; 5], req: &[i32; 5], add: &[i32; 5]) {
+    for i in 0..5 {
+        if req[i] == 0 { continue; }
+        // Effective requirement: the item needs req[i] SP, but it also
+        // contributes add[i]. If add[i] is negative, we need extra SP
+        // to compensate. If add[i] is positive, the check is stricter
+        // because the item's own bonus inflates the total.
+        let effective_req = req[i] + add[i];
+        if effective_req > totals[i] {
+            let gap = effective_req - totals[i];
+            assigned[i] += gap;
+            totals[i] += gap;
+        }
+    }
+}
+
+/// Check if an item can be equipped given current totals.
+fn can_equip(totals: &[i32; 5], req: &[i32; 5]) -> bool {
+    for i in 0..5 {
+        if req[i] > 0 && totals[i] < req[i] {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if an item could be equipped given a saved state + delta.
+fn can_equip_with_delta(saved_state: &[i32; 5], delta: &[i32; 5], req: &[i32; 5]) -> bool {
+    for i in 0..5 {
+        if req[i] > 0 && (saved_state[i] + delta[i]) < req[i] {
+            return false;
+        }
+    }
+    true
+}
+
+/// Compute the delta between two SP states.
+fn compute_delta(old: &[i32; 5], new: &[i32; 5]) -> [i32; 5] {
+    let mut delta = [0; 5];
+    for i in 0..5 {
+        delta[i] = new[i] - old[i];
+    }
+    delta
+}
+
+/// Simple greedy fallback if the recursive search finds nothing.
+fn greedy_fallback(
+    apparels: &[&Apparel],
+    weapon_req: &ElementalValues<i32>,
+    weapon_add: &ElementalValues<i32>,
+) -> SpAssignment {
+    let mut assigned = [0i32; 5];
+    let mut totals = [0i32; 5];
+
+    // Sort by total SP bonus descending (process providers first)
+    let mut order: Vec<usize> = (0..apparels.len()).collect();
+    order.sort_by(|&a, &b| {
+        apparels[b].skill_point_bonus.sum().cmp(&apparels[a].skill_point_bonus.sum())
+    });
+
+    for &idx in &order {
+        let req = apparels[idx].requirements.as_array();
+        let add = apparels[idx].skill_point_bonus.as_array();
+        apply_to_fit(&mut assigned, &mut totals, &req);
+        apply_bonuses(&mut totals, &add);
     }
 
-    (assigned, current)
+    let w_req = weapon_req.as_array();
+    let w_add = weapon_add.as_array();
+    apply_to_fit(&mut assigned, &mut totals, &w_req);
+    apply_bonuses(&mut totals, &w_add);
+
+    // Pop check
+    for &idx in &order {
+        let req = apparels[idx].requirements.as_array();
+        let add = apparels[idx].skill_point_bonus.as_array();
+        fix_should_pop(&mut assigned, &mut totals, &req, &add);
+    }
+
+    SpAssignment {
+        assigned: SkillPoints::from_array(assigned),
+        total: SkillPoints::from_array(totals),
+    }
 }
 
 fn apply_weapon_only(
     weapon_req: &ElementalValues<i32>,
     weapon_add: &ElementalValues<i32>,
 ) -> SpAssignment {
-    let mut assigned = SkillPoints::default();
-    let mut current = SkillPoints::default();
-    for elem in Element::ALL {
-        let req = weapon_req.get(elem);
-        if req > 0 {
-            *elem_mut(&mut assigned, elem) = req;
-            *elem_mut(&mut current, elem) = req;
-        }
-        *elem_mut(&mut current, elem) += weapon_add.get(elem);
-    }
+    let mut assigned = [0i32; 5];
+    let mut totals = [0i32; 5];
+    let req = weapon_req.as_array();
+    let add = weapon_add.as_array();
+    apply_to_fit(&mut assigned, &mut totals, &req);
+    apply_bonuses(&mut totals, &add);
     SpAssignment {
-        assigned,
-        total: current,
+        assigned: SkillPoints::from_array(assigned),
+        total: SkillPoints::from_array(totals),
     }
 }
 
-/// Tarjan's SCC algorithm.
-fn tarjan_scc(n: usize, adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    struct State {
-        index_counter: usize,
-        stack: Vec<usize>,
-        on_stack: Vec<bool>,
-        index: Vec<Option<usize>>,
-        lowlink: Vec<usize>,
-        result: Vec<Vec<usize>>,
-    }
-
-    fn strongconnect(v: usize, adj: &[Vec<usize>], state: &mut State) {
-        state.index[v] = Some(state.index_counter);
-        state.lowlink[v] = state.index_counter;
-        state.index_counter += 1;
-        state.stack.push(v);
-        state.on_stack[v] = true;
-
-        for &w in &adj[v] {
-            if state.index[w].is_none() {
-                strongconnect(w, adj, state);
-                state.lowlink[v] = state.lowlink[v].min(state.lowlink[w]);
-            } else if state.on_stack[w] {
-                state.lowlink[v] = state.lowlink[v].min(state.index[w].unwrap());
-            }
-        }
-
-        if state.lowlink[v] == state.index[v].unwrap() {
-            let mut component = Vec::new();
-            loop {
-                let w = state.stack.pop().unwrap();
-                state.on_stack[w] = false;
-                component.push(w);
-                if w == v {
-                    break;
-                }
-            }
-            state.result.push(component);
-        }
-    }
-
-    let mut state = State {
-        index_counter: 0,
-        stack: Vec::new(),
-        on_stack: vec![false; n],
-        index: vec![None; n],
-        lowlink: vec![0; n],
-        result: Vec::new(),
-    };
-
-    for v in 0..n {
-        if state.index[v].is_none() {
-            strongconnect(v, adj, &mut state);
-        }
-    }
-
-    state.result
-}
-
-/// Generate all permutations of a slice.
-fn permutations(items: &[usize]) -> Vec<Vec<usize>> {
-    if items.len() <= 1 {
-        return vec![items.to_vec()];
-    }
-    let mut result = Vec::new();
-    for (i, &item) in items.iter().enumerate() {
-        let rest: Vec<usize> = items[..i]
-            .iter()
-            .chain(items[i + 1..].iter())
-            .copied()
-            .collect();
-        for mut perm in permutations(&rest) {
-            perm.insert(0, item);
-            result.push(perm);
-        }
-    }
-    result
-}
-
-fn elem_mut(vals: &mut ElementalValues<i32>, elem: Element) -> &mut i32 {
-    match elem {
-        Element::Earth => &mut vals.earth,
-        Element::Thunder => &mut vals.thunder,
-        Element::Water => &mut vals.water,
-        Element::Fire => &mut vals.fire,
-        Element::Air => &mut vals.air,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -333,28 +427,5 @@ mod tests {
         let pct_150 = skill_points_to_percentage(150);
         assert!(pct_150 > 0.0 && pct_150 < 1.0);
         assert!((skill_points_to_percentage(-10) - 0.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_tarjan_single_scc() {
-        // A -> B -> A (cycle)
-        let adj = vec![vec![1], vec![0]];
-        let sccs = tarjan_scc(2, &adj);
-        assert_eq!(sccs.len(), 1);
-        assert_eq!(sccs[0].len(), 2);
-    }
-
-    #[test]
-    fn test_tarjan_no_cycles() {
-        // A -> B, no cycle
-        let adj = vec![vec![1], vec![]];
-        let sccs = tarjan_scc(2, &adj);
-        assert_eq!(sccs.len(), 2);
-    }
-
-    #[test]
-    fn test_permutations() {
-        let perms = permutations(&[0, 1, 2]);
-        assert_eq!(perms.len(), 6);
     }
 }

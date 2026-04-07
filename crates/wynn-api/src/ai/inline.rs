@@ -39,6 +39,8 @@ struct ClaudeResponse {
     suggested_flex_slots: Vec<String>,
     #[serde(default)]
     suggested_objectives: Vec<String>,
+    #[serde(default)]
+    suggested_constraints: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Load the JSON schema from the schemas/ directory next to the binary,
@@ -135,13 +137,21 @@ impl AiProvider for ClaudeCliProvider {
                         .map(|s| s.to_string())
                         .collect();
 
+                    // Convert Claude's suggested constraints into the solver format
+                    let constraints: serde_json::Value = if claude_result.suggested_constraints.is_empty() {
+                        json!({})
+                    } else {
+                        serde_json::Value::Object(claude_result.suggested_constraints.clone())
+                    };
+
                     let solve_call = ToolCall {
                         name: "solve_build".into(),
                         arguments: json!({
                             "url": url,
                             "locked_slots": locked,
                             "objectives": claude_result.suggested_objectives,
-                            "available_points": 250,
+                            "constraints": constraints,
+                            "available_points": 200,
                             "max_results": 3,
                             "min_item_level": 90,
                         }),

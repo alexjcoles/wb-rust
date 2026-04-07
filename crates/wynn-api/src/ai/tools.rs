@@ -205,7 +205,8 @@ fn tool_solve_build(args: &Value, db: &ItemDb) -> Result<Value, String> {
             .unwrap_or_default(),
         objectives,
         max_results: args["max_results"].as_u64().unwrap_or(5) as usize,
-        min_item_level: args["min_item_level"].as_u64().unwrap_or(90) as u32,
+        min_item_level: args["min_item_level"].as_u64().unwrap_or(0) as u32,
+        ..Default::default()
     };
 
     let results = solve(&build, &locked, &config, db);

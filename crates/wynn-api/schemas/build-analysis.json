@@ -14,8 +14,13 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "Stats to maximise in solver (e.g. ehp, thunder_defence). Empty if no changes suggested."
+    },
+    "suggested_constraints": {
+      "type": "object",
+      "description": "Hard minimum stat requirements the solver MUST satisfy. Use field names like min_hp, min_ehp, min_thunder_defence, min_earth_defence, min_water_defence, min_fire_defence, min_air_defence, min_mana_regen, min_walk_speed, min_hpr, min_life_steal, min_spell_damage_raw. Values are integers (except min_ehp which is a number). Only include constraints that matter for the fix.",
+      "additionalProperties": { "type": "number" }
     }
   },
-  "required": ["analysis", "suggested_flex_slots", "suggested_objectives"],
+  "required": ["analysis", "suggested_flex_slots", "suggested_objectives", "suggested_constraints"],
   "additionalProperties": false
 }

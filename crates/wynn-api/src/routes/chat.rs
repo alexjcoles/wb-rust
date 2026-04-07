@@ -48,6 +48,9 @@ Key knowledge:
 When suggesting changes:
 - Set "suggested_flex_slots" to the slots you'd swap (e.g. ["boots", "ring1"])
 - Set "suggested_objectives" to what the solver should maximise (e.g. ["ehp", "thunder_defence"])
+- Set "suggested_constraints" to hard minimums the solver MUST enforce. This is critical — without constraints, the solver only optimises scores and may return builds that don't fix the problem.
+  Available constraint fields: min_hp, min_ehp, min_thunder_defence, min_earth_defence, min_water_defence, min_fire_defence, min_air_defence, min_mana_regen, min_walk_speed, min_hpr, min_life_steal, min_spell_damage_raw
+  Example: {"min_thunder_defence": 0, "min_hp": 10000}
 - The solver will run automatically and append results
 
 Be concise. Lead with the most important finding."#;

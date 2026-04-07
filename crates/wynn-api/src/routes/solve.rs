@@ -76,6 +76,7 @@ pub async fn solve_build(
         objectives,
         max_results: req.max_results.min(20),
         min_item_level: req.min_item_level,
+        ..Default::default()
     };
 
     let results = solve(&build, &locked, &config, &state.db);
