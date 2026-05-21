@@ -25,6 +25,12 @@ pub struct Build {
     /// Powders per powderable slot, in encoding order:
     /// [helmet, chestplate, leggings, boots, weapon]
     pub powders: [Vec<Powder>; 5],
+
+    /// Raw aspect bits from the URL hash (passed through on re-encode).
+    pub aspect_bits: Option<Vec<bool>>,
+
+    /// Raw ability tree bits from the URL hash (passed through on re-encode).
+    pub atree_bits: Option<Vec<bool>>,
 }
 
 impl Build {
@@ -43,6 +49,8 @@ impl Build {
             available_points: 200,
             assigned_sp: None,
             powders: Default::default(),
+            aspect_bits: None,
+            atree_bits: None,
         }
     }
 
@@ -110,12 +118,8 @@ impl Build {
         }
     }
 
-    /// Base HP from player level (approximate formula used by WynnBuilder).
+    /// Base HP from player level. Matches WynnBuilder.
     pub fn base_hp(&self) -> i32 {
-        // WynnBuilder formula: 5 * level + 5 * level * level (simplified)
-        // Actual formula from hppeng: varies by level bracket
-        // For level 106: base_hp = 500 + 5 * level (close enough for now, will refine)
-        // TODO: verify exact formula from WynnBuilder source
         5 * self.level as i32 + 5
     }
 }

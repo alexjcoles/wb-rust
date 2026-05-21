@@ -120,6 +120,11 @@ impl BitVec {
         self.bits.push(bit);
     }
 
+    /// Write raw bits from a slice.
+    pub fn write_raw_bits(&mut self, bits: &[bool]) {
+        self.bits.extend_from_slice(bits);
+    }
+
     /// Remaining bits available to read.
     pub fn remaining(&self) -> usize {
         self.bits.len().saturating_sub(self.cursor)
@@ -128,6 +133,18 @@ impl BitVec {
     /// Current cursor position.
     pub fn position(&self) -> usize {
         self.cursor
+    }
+
+    /// Extract a slice of bits by position range.
+    pub fn slice_bits(&self, start: usize, end: usize) -> Vec<bool> {
+        self.bits[start..end].to_vec()
+    }
+
+    /// Read all remaining bits from the cursor.
+    pub fn read_remaining_bits(&mut self) -> Vec<bool> {
+        let bits = self.bits[self.cursor..].to_vec();
+        self.cursor = self.bits.len();
+        bits
     }
 }
 

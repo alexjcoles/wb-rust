@@ -153,8 +153,9 @@ fn decode_binary(hash: &str, db: &ItemDb) -> Result<Build, DecodeError> {
         build.level = bv.read_bits(consts.level_bitlen)? as u32;
     }
 
-    // Aspects (skip for now if present)
+    // Aspects — capture raw bits for passthrough
     if consts.num_aspects > 0 && bv.remaining() > 0 {
+        let aspect_start = bv.position();
         let has_aspects = bv.read_bit().unwrap_or(false);
         if has_aspects {
             for _ in 0..consts.num_aspects {
@@ -165,9 +166,14 @@ fn decode_binary(hash: &str, db: &ItemDb) -> Result<Build, DecodeError> {
                 }
             }
         }
+        let aspect_end = bv.position();
+        build.aspect_bits = Some(bv.slice_bits(aspect_start, aspect_end));
     }
 
-    // Remaining bits are ability tree (skip for now)
+    // Ability tree — capture all remaining bits for passthrough
+    if bv.remaining() > 0 {
+        build.atree_bits = Some(bv.read_remaining_bits());
+    }
 
     Ok(build)
 }

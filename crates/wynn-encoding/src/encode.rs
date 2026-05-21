@@ -75,12 +75,17 @@ pub fn encode_build(build: &Build) -> String {
         bv.write_bits(build.level as u64, consts.level_bitlen);
     }
 
-    // Aspects: none for now
-    if consts.num_aspects > 0 {
+    // Aspects — pass through from original build if present
+    if let Some(ref aspect_bits) = build.aspect_bits {
+        bv.write_raw_bits(aspect_bits);
+    } else if consts.num_aspects > 0 {
         bv.write_bit(false); // NO_ASPECTS
     }
 
-    // No ability tree for now
+    // Ability tree — pass through from original build if present
+    if let Some(ref atree_bits) = build.atree_bits {
+        bv.write_raw_bits(atree_bits);
+    }
 
     bv.to_hash()
 }
